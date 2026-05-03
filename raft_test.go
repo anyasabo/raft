@@ -2548,6 +2548,66 @@ func TestRaft_LeadershipTransferFailureUnblocksWrites(t *testing.T) {
 	require.NoError(t, currentLeader.Apply([]byte("after-failed-transfer"), 0).Error())
 }
 
+func TestRaft_LeadershipTransferVoteFlagRespectsLogFreshness(t *testing.T) {
+	conf := inmemConfig(t)
+	conf.ProtocolVersion = 3
+	c := MakeCluster(3, t, conf)
+	defer c.Close()
+
+	leader := c.Leader()
+	followers := c.Followers()
+	leaderTransport := c.trans[c.IndexOf(leader)]
+	staleCandidate := followers[0]
+	voter := followers[1]
+
+	require.NoError(t, leader.Apply([]byte("fresh-log"), 0).Error())
+
+	reqVote := RequestVoteRequest{
+		RPCHeader:          leader.getRPCHeader(),
+		Term:               leader.getCurrentTerm() + 1,
+		LastLogIndex:       0,
+		LastLogTerm:        0,
+		Candidate:          leaderTransport.EncodePeer(staleCandidate.localID, staleCandidate.localAddr),
+		LeadershipTransfer: true,
+	}
+	reqVote.Addr = leaderTransport.EncodePeer(staleCandidate.localID, staleCandidate.localAddr)
+
+	var resp RequestVoteResponse
+	require.NoError(t, leaderTransport.RequestVote(voter.localID, voter.localAddr, &reqVote, &resp))
+	require.False(t, resp.Granted, "leadership-transfer vote flag must not bypass log freshness checks")
+}
+
+func TestRaft_LeadershipTransferRetryAfterFailure(t *testing.T) {
+	c := MakeCluster(3, t, nil)
+	defer c.Close()
+
+	initialLeader := c.Leader()
+	firstTarget := c.Followers()[0]
+
+	failedTransfer := initialLeader.LeadershipTransferToServer(firstTarget.localID, ServerAddress("localhost"))
+	require.Error(t, failedTransfer.Error())
+	require.Eventually(t, func() bool {
+		return !initialLeader.getLeadershipTransferInProgress()
+	}, time.Second, time.Millisecond, "failed transfer should clear transfer-in-progress state")
+
+	retryLeader := c.Leader()
+	require.NoError(t, retryLeader.Apply([]byte("after-failed-transfer-before-retry"), 0).Error())
+
+	var retryTarget *Raft
+	for _, follower := range c.Followers() {
+		if follower.localID != retryLeader.localID {
+			retryTarget = follower
+			break
+		}
+	}
+	require.NotNil(t, retryTarget)
+
+	retryTransfer := retryLeader.LeadershipTransferToServer(retryTarget.localID, retryTarget.localAddr)
+	require.NoError(t, retryTransfer.Error())
+	require.Equal(t, retryTarget.localID, c.Leader().localID)
+	require.NoError(t, c.Leader().Apply([]byte("after-retry-transfer"), 0).Error())
+}
+
 func TestRaft_LeadershipTransferToBehindServer(t *testing.T) {
 	c := MakeCluster(3, t, nil)
 	defer c.Close()

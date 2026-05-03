@@ -28,6 +28,10 @@ or network transport details.
 - `TypeInvariant`: state shape remains valid.
 - `NoWritesAcceptedDuringTransfer`: no old-leader writes are accepted while a
   transfer is in progress.
+- `KnownLeaderRequiresTransferFlag`: when a known leader exists, the transfer
+  vote flag is required for the target to become leader.
+- `TransferVoteRespectsLogFreshness`: even with transfer voting enabled, a
+  stale target log cannot win leadership.
 - `TransferResolutionUnblocksWrites`: once transfer resolves, write blocking is
   cleared.
 - `TransferEventuallyResolves`: transfer-in-progress leads to a resolved
@@ -53,4 +57,6 @@ java -cp /path/to/tla2tools.jar tlc2.TLC LeadershipTransfer.tla -config Leadersh
   `TestRaft_LeadershipTransferToInvalidAddress`,
   `TestRaft_LeadershipTransferLeaderRejectsClientRequests`.
 - Model-derived addition in this phase:
-  `TestRaft_LeadershipTransferFailureUnblocksWrites`.
+  `TestRaft_LeadershipTransferFailureUnblocksWrites`,
+  `TestRaft_LeadershipTransferVoteFlagRespectsLogFreshness`,
+  `TestRaft_LeadershipTransferRetryAfterFailure`.
