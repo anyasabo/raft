@@ -2485,6 +2485,32 @@ func TestRaft_LeadershipTransferWithWrites(t *testing.T) {
 	t.Logf("writes: %d", writes)
 }
 
+func TestRaft_LeadershipTransferBlocksOldLeaderWritesUntilStepdown(t *testing.T) {
+	conf := inmemConfig(t)
+	c := MakeCluster(3, t, conf)
+	defer c.Close()
+
+	oldLeader := c.Leader()
+	require.NoError(t, oldLeader.Apply([]byte("before-transfer"), 0).Error())
+
+	target := c.Followers()[0]
+	transferFuture := oldLeader.LeadershipTransferToServer(target.localID, target.localAddr)
+
+	require.NoError(t, transferFuture.Error())
+	require.Eventually(t, func() bool {
+		return oldLeader.State() != Leader
+	}, time.Second, time.Millisecond, "leadership transfer future should not return before old leader steps down")
+
+	err := oldLeader.Apply([]byte("after-transfer-old-leader"), 0).Error()
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrNotLeader) || errors.Is(err, ErrLeadershipLost) || errors.Is(err, ErrLeadershipTransferInProgress),
+		"old leader should reject writes after transfer completes, got: %v", err)
+
+	newLeader := c.Leader()
+	require.Equal(t, target.localID, newLeader.localID)
+	require.NoError(t, newLeader.Apply([]byte("after-transfer"), 0).Error())
+}
+
 func TestRaft_LeadershipTransferWithSevenNodes(t *testing.T) {
 	c := MakeCluster(7, t, nil)
 	defer c.Close()

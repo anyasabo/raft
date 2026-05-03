@@ -230,7 +230,18 @@ func (c *cluster) generateNApplies(s *applySource, n uint) [][]byte {
 
 func (c *cluster) leadershipTransfer(leaderTimeout time.Duration) raft.Future {
 	ldr := c.Leader(leaderTimeout)
+	if ldr == nil {
+		return staticErrorFuture{err: fmt.Errorf("leadership transfer failed: no leader elected within %s", leaderTimeout)}
+	}
 	return ldr.raft.LeadershipTransfer()
+}
+
+type staticErrorFuture struct {
+	err error
+}
+
+func (f staticErrorFuture) Error() error {
+	return f.err
 }
 
 type applyFutureWithData struct {
