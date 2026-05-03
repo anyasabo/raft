@@ -19,7 +19,9 @@ or network transport details.
 ## Files
 
 - `LeadershipTransfer.tla`: model and properties.
-- `LeadershipTransfer.cfg`: expected/correct write-gating configuration.
+- `LeadershipTransfer.cfg`: liveness + safety checks with bounded log indices.
+- `LeadershipTransferSafety.cfg`: safety-only profile (no liveness property).
+- `LeadershipTransferFast.cfg`: fast-iteration profile using a level bound.
 - `LeadershipTransferBug.cfg`: bug-mode configuration that allows writes during
   transfer and should violate the no-write invariant.
 
@@ -39,17 +41,44 @@ or network transport details.
 
 ## How to run
 
-From this directory:
+From this directory, fetch the latest official jar (currently v1.8.0):
 
 ```bash
-java -cp /path/to/tla2tools.jar tlc2.TLC LeadershipTransfer.tla -config LeadershipTransfer.cfg
+mkdir -p tools
+curl -fsSL -o tools/tla2tools-v1.8.0.jar \
+  "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar"
+echo "556786039c954356cf970ed0dbd6a10541c70044  tools/tla2tools-v1.8.0.jar" | sha1sum --check
+```
+
+Then run the "good" model:
+
+```bash
+java -XX:+UseParallelGC -cp "tools/tla2tools-v1.8.0.jar" \
+  tlc2.TLC -workers 8 -checkpoint 5 -config LeadershipTransfer.cfg LeadershipTransfer
+```
+
+Run safety-only checks (faster than liveness):
+
+```bash
+java -XX:+UseParallelGC -cp "tools/tla2tools-v1.8.0.jar" \
+  tlc2.TLC -workers 8 -checkpoint 5 -config LeadershipTransferSafety.cfg LeadershipTransfer
+```
+
+Run a fast bounded model while iterating:
+
+```bash
+java -XX:+UseParallelGC -cp "tools/tla2tools-v1.8.0.jar" \
+  tlc2.TLC -workers 8 -checkpoint 5 -config LeadershipTransferFast.cfg LeadershipTransfer
 ```
 
 To observe the expected counterexample for the bug-mode model:
 
 ```bash
-java -cp /path/to/tla2tools.jar tlc2.TLC LeadershipTransfer.tla -config LeadershipTransferBug.cfg
+java -XX:+UseParallelGC -cp "tools/tla2tools-v1.8.0.jar" \
+  tlc2.TLC -workers 8 -checkpoint 5 -config LeadershipTransferBug.cfg LeadershipTransfer
 ```
+
+Reference: [TLA+ v1.8.0 release](https://github.com/tlaplus/tlaplus/releases/tag/v1.8.0)
 
 ## Mapping to Go tests
 

@@ -148,6 +148,14 @@ TransferResolutionUnblocksWrites ==
 TransferEventuallyResolves ==
   transferInProgress ~> (transferOutcome # "none")
 
+FastConstraint ==
+  TLCGet("level") < 35
+
+BoundedLogConstraint ==
+  /\ logIndex[OldLeader] <= 10
+  /\ logIndex[Target] <= 10
+  /\ logIndex[Other] <= 10
+
 Spec ==
   Init /\ [][Next]_vars /\ WF_vars(ResolveTransfer)
 
