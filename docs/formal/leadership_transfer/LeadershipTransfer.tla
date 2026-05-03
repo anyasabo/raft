@@ -156,6 +156,11 @@ BoundedLogConstraint ==
   /\ logIndex[Target] <= 10
   /\ logIndex[Other] <= 10
 
+DeepBoundedLogConstraint ==
+  /\ logIndex[OldLeader] <= 20
+  /\ logIndex[Target] <= 20
+  /\ logIndex[Other] <= 20
+
 Spec ==
   Init /\ [][Next]_vars /\ WF_vars(ResolveTransfer)
 

@@ -22,6 +22,10 @@ or network transport details.
 - `LeadershipTransfer.cfg`: liveness + safety checks with bounded log indices.
 - `LeadershipTransferSafety.cfg`: safety-only profile (no liveness property).
 - `LeadershipTransferFast.cfg`: fast-iteration profile using a level bound.
+- `LeadershipTransferDeep.cfg`: deeper liveness + safety profile with higher
+  log-index bounds.
+- `LeadershipTransferDeepSafety.cfg`: deeper safety-only profile with higher
+  log-index bounds.
 - `LeadershipTransferBug.cfg`: bug-mode configuration that allows writes during
   transfer and should violate the no-write invariant.
 
@@ -41,7 +45,13 @@ or network transport details.
 
 ## How to run
 
-From this directory, fetch the latest official jar (currently v1.8.0):
+First move into the model directory:
+
+```bash
+cd "$(git rev-parse --show-toplevel)/docs/formal/leadership_transfer"
+```
+
+Then fetch the latest official jar (currently v1.8.0):
 
 ```bash
 mkdir -p tools
@@ -69,6 +79,16 @@ Run a fast bounded model while iterating:
 ```bash
 java -XX:+UseParallelGC -cp "tools/tla2tools-v1.8.0.jar" \
   tlc2.TLC -workers 8 -checkpoint 5 -config LeadershipTransferFast.cfg LeadershipTransfer
+```
+
+Run deeper bug-hunting checks:
+
+```bash
+java -XX:+UseParallelGC -cp "tools/tla2tools-v1.8.0.jar" \
+  tlc2.TLC -workers 8 -checkpoint 5 -config LeadershipTransferDeepSafety.cfg LeadershipTransfer
+
+java -XX:+UseParallelGC -cp "tools/tla2tools-v1.8.0.jar" \
+  tlc2.TLC -workers 8 -checkpoint 5 -config LeadershipTransferDeep.cfg LeadershipTransfer
 ```
 
 To observe the expected counterexample for the bug-mode model:

@@ -24,3 +24,10 @@ _testmain.go
 
 # Goland IDE
 .idea
+
+# TLA+ leadership transfer model artifacts
+docs/formal/leadership_transfer/tools/
+docs/formal/leadership_transfer/states/
+docs/formal/leadership_transfer/LeadershipTransfer_TTrace_*.tla
+docs/formal/leadership_transfer/LeadershipTransfer_TTrace_*.bin
+docs/formal/tools/
