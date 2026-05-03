@@ -2531,6 +2531,23 @@ func TestRaft_LeadershipTransferToInvalidAddress(t *testing.T) {
 	}
 }
 
+func TestRaft_LeadershipTransferFailureUnblocksWrites(t *testing.T) {
+	c := MakeCluster(3, t, nil)
+	defer c.Close()
+
+	oldLeader := c.Leader()
+	follower := c.GetInState(Follower)[0]
+	future := oldLeader.LeadershipTransferToServer(follower.localID, ServerAddress("localhost"))
+	require.Error(t, future.Error())
+
+	require.Eventually(t, func() bool {
+		return !oldLeader.getLeadershipTransferInProgress()
+	}, time.Second, time.Millisecond, "failed transfer should clear transfer-in-progress state")
+
+	currentLeader := c.Leader()
+	require.NoError(t, currentLeader.Apply([]byte("after-failed-transfer"), 0).Error())
+}
+
 func TestRaft_LeadershipTransferToBehindServer(t *testing.T) {
 	c := MakeCluster(3, t, nil)
 	defer c.Close()

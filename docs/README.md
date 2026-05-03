@@ -11,6 +11,7 @@ or contributing to the code.
    1. [Apply](./apply.md)
 3. [Threads](#threads)
 4. [Divergence](./divergence.md)
+5. [Formal Models](./formal/leadership_transfer/README.md)
 
 
 ## Terminology
