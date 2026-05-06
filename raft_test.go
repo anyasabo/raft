@@ -2061,6 +2061,68 @@ func TestRaft_AppendEntry(t *testing.T) {
 	require.True(t, resp2.Success)
 }
 
+func TestRaft_AppendEntriesMalformedConfigurationReturnsError(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{Index: 1, Term: 1, Type: LogCommand, Data: []byte("1")},
+		{Index: 2, Term: 1, Type: LogCommand, Data: []byte("2")},
+	}))
+
+	r := &Raft{
+		trans:     transport,
+		logs:      logs,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+		configurations: configurations{
+			committed:      Configuration{Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}}},
+			committedIndex: 1,
+			latest:         Configuration{Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}}},
+			latestIndex:    1,
+		},
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+	r.setState(Follower)
+	r.setLastLog(2, 1)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		Term:         5,
+		Leader:       encodedLeader,
+		PrevLogEntry: 2,
+		PrevLogTerm:  1,
+		Entries: []*Log{
+			{
+				Index: 3,
+				Term:  5,
+				Type:  LogConfiguration,
+				Data:  []byte("not-msgpack-configuration"),
+			},
+		},
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: chResp}, req)
+	resp := <-chResp
+	require.Error(t, resp.Error)
+	require.Contains(t, resp.Error.Error(), "failed to decode configuration")
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.False(t, appendResp.Success)
+}
+
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
 // a mix of nodes that have pre-vote activated and deactivated.
 // Once the cluster is created, we force an election by partioning the leader
@@ -2897,6 +2959,58 @@ func TestRaft_InstallSnapshot_InvalidPeers(t *testing.T) {
 	resp := <-chResp
 	require.Error(t, resp.Error)
 	require.Contains(t, resp.Error.Error(), "failed to decode peers")
+}
+
+func TestRaft_InstallSnapshotMalformedConfigurationReturnsError(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	r := &Raft{
+		trans:     transport,
+		logger:    hclog.New(nil),
+		snapshots: NewInmemSnapshotStore(),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+	r.setLastSnapshot(100, 5)
+	r.setLastApplied(100)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+
+	req := &InstallSnapshotRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		SnapshotVersion:    SnapshotVersionMax,
+		Term:               5,
+		Leader:             encodedLeader,
+		LastLogIndex:       120,
+		LastLogTerm:        5,
+		Configuration:      []byte("not-msgpack-configuration"),
+		ConfigurationIndex: 120,
+		Size:               0,
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.installSnapshot(RPC{Reader: bytes.NewReader(nil), RespChan: chResp}, req)
+	resp := <-chResp
+	require.Error(t, resp.Error)
+	require.Contains(t, resp.Error.Error(), "failed to decode configuration")
+
+	snapResp, ok := resp.Response.(*InstallSnapshotResponse)
+	require.True(t, ok)
+	require.False(t, snapResp.Success)
+
+	snapshotIndex, snapshotTerm := r.getLastSnapshot()
+	require.Equal(t, uint64(100), snapshotIndex)
+	require.Equal(t, uint64(5), snapshotTerm)
+	require.Equal(t, uint64(100), r.getLastApplied())
 }
 
 func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {

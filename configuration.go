@@ -357,12 +357,20 @@ func EncodeConfiguration(configuration Configuration) []byte {
 	return buf.Bytes()
 }
 
+func decodeConfiguration(buf []byte) (Configuration, error) {
+	var configuration Configuration
+	if err := decodeMsgPack(buf, &configuration); err != nil {
+		return Configuration{}, fmt.Errorf("failed to decode configuration: %v", err)
+	}
+	return configuration, nil
+}
+
 // DecodeConfiguration deserializes a Configuration using MsgPack, or panics on
 // errors.
 func DecodeConfiguration(buf []byte) Configuration {
-	var configuration Configuration
-	if err := decodeMsgPack(buf, &configuration); err != nil {
-		panic(fmt.Errorf("failed to decode configuration: %v", err))
+	configuration, err := decodeConfiguration(buf)
+	if err != nil {
+		panic(err)
 	}
 	return configuration
 }

@@ -1586,8 +1586,12 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 func (r *Raft) processConfigurationLogEntry(entry *Log) error {
 	switch entry.Type {
 	case LogConfiguration:
+		conf, err := decodeConfiguration(entry.Data)
+		if err != nil {
+			return err
+		}
 		r.setCommittedConfiguration(r.configurations.latest, r.configurations.latestIndex)
-		r.setLatestConfiguration(DecodeConfiguration(entry.Data), entry.Index)
+		r.setLatestConfiguration(conf, entry.Index)
 
 	case LogAddPeerDeprecated, LogRemovePeerDeprecated:
 		r.setCommittedConfiguration(r.configurations.latest, r.configurations.latestIndex)
@@ -1859,7 +1863,11 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	var reqConfiguration Configuration
 	var reqConfigurationIndex uint64
 	if req.SnapshotVersion > 0 {
-		reqConfiguration = DecodeConfiguration(req.Configuration)
+		reqConfiguration, rpcErr = decodeConfiguration(req.Configuration)
+		if rpcErr != nil {
+			r.logger.Error("failed to install snapshot", "error", rpcErr)
+			return
+		}
 		reqConfigurationIndex = req.ConfigurationIndex
 	} else {
 		reqConfiguration, rpcErr = decodePeers(req.Peers, r.trans)
