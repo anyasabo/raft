@@ -1480,9 +1480,16 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	// Verify the last log entry
 	if a.PrevLogEntry > 0 {
 		lastIdx, lastTerm := r.getLastEntry()
+		snapIdx, snapTerm := r.getLastSnapshot()
 
 		var prevLogTerm uint64
-		if a.PrevLogEntry == lastIdx {
+		if a.PrevLogEntry < snapIdx {
+			// If the requested previous index is already compacted by snapshot,
+			// treat it as a match to allow snapshot-based catch-up progress.
+			prevLogTerm = a.PrevLogTerm
+		} else if a.PrevLogEntry == snapIdx {
+			prevLogTerm = snapTerm
+		} else if a.PrevLogEntry == lastIdx {
 			prevLogTerm = lastTerm
 		} else {
 			var prevLog Log

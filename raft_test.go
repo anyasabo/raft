@@ -2364,6 +2364,108 @@ func TestRaft_AppendEntriesConflictRollbackLatestConfigurationAfterSnapshotBase(
 	require.Equal(t, committedConfig, r.configurations.latest)
 }
 
+func TestRaft_AppendEntriesAcceptsPrevLogAtSnapshotBoundary(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{Index: 101, Term: 5, Type: LogCommand, Data: []byte("101")},
+		{Index: 102, Term: 5, Type: LogCommand, Data: []byte("102")},
+		{Index: 103, Term: 5, Type: LogCommand, Data: []byte("103")},
+	}))
+
+	r := &Raft{
+		trans:     transport,
+		logs:      logs,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(6)
+	r.setState(Follower)
+	r.setLastSnapshot(100, 5)
+	r.setLastLog(103, 5)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		Term:         6,
+		Leader:       encodedLeader,
+		PrevLogEntry: 100,
+		PrevLogTerm:  5,
+		Entries: []*Log{
+			{Index: 101, Term: 6, Type: LogCommand, Data: []byte("replacement-101")},
+		},
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: chResp}, req)
+	resp := <-chResp
+	require.NoError(t, resp.Error)
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.True(t, appendResp.Success, "matching snapshot boundary term should satisfy prev-log check")
+}
+
+func TestRaft_AppendEntriesRejectsPrevLogAtSnapshotBoundaryWithWrongTerm(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{Index: 101, Term: 5, Type: LogCommand, Data: []byte("101")},
+	}))
+
+	r := &Raft{
+		trans:     transport,
+		logs:      logs,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(6)
+	r.setState(Follower)
+	r.setLastSnapshot(100, 5)
+	r.setLastLog(101, 5)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		Term:         6,
+		Leader:       encodedLeader,
+		PrevLogEntry: 100,
+		PrevLogTerm:  4,
+		Entries: []*Log{
+			{Index: 101, Term: 6, Type: LogCommand, Data: []byte("replacement-101")},
+		},
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: chResp}, req)
+	resp := <-chResp
+	require.NoError(t, resp.Error)
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.False(t, appendResp.Success, "mismatched snapshot boundary term should fail prev-log check")
+}
+
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
 // a mix of nodes that have pre-vote activated and deactivated.
 // Once the cluster is created, we force an election by partioning the leader
