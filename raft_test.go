@@ -2218,6 +2218,79 @@ func TestRaft_AppendEntriesStoreLogsFailureRefreshesLastLogAfterTruncate(t *test
 	require.Equal(t, uint64(2), storeLastIdx)
 }
 
+func TestRaft_AppendEntriesConflictRollbackLatestConfiguration(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{Index: 1, Term: 1, Type: LogCommand, Data: []byte("1")},
+		{Index: 2, Term: 1, Type: LogCommand, Data: []byte("2")},
+		{Index: 3, Term: 1, Type: LogCommand, Data: []byte("3")},
+		{Index: 4, Term: 1, Type: LogCommand, Data: []byte("4")},
+		{Index: 5, Term: 1, Type: LogCommand, Data: []byte("5")},
+	}))
+
+	committedConfig := Configuration{
+		Servers: []Server{
+			{Suffrage: Voter, ID: "leader", Address: "leader-addr"},
+		},
+	}
+	latestConfig := Configuration{
+		Servers: []Server{
+			{Suffrage: Voter, ID: "leader", Address: "leader-addr"},
+			{Suffrage: Voter, ID: "new", Address: "new-addr"},
+		},
+	}
+
+	r := &Raft{
+		trans:     transport,
+		logs:      logs,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+		configurations: configurations{
+			committed:      committedConfig,
+			committedIndex: 1,
+			latest:         latestConfig,
+			latestIndex:    5,
+		},
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+	r.setState(Follower)
+	r.setLastLog(5, 1)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		Term:         5,
+		Leader:       encodedLeader,
+		PrevLogEntry: 2,
+		PrevLogTerm:  1,
+		Entries: []*Log{
+			{Index: 3, Term: 2, Type: LogCommand, Data: []byte("replacement-3")},
+		},
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: chResp}, req)
+	resp := <-chResp
+	require.NoError(t, resp.Error)
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.True(t, appendResp.Success)
+	require.Equal(t, uint64(1), r.configurations.latestIndex)
+	require.Equal(t, committedConfig, r.configurations.latest)
+}
+
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
 // a mix of nodes that have pre-vote activated and deactivated.
 // Once the cluster is created, we force an election by partioning the leader
