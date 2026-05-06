@@ -3167,6 +3167,60 @@ func TestRaft_InstallSnapshot_OlderTermDoesNotRegressLeaderOrTerm(t *testing.T) 
 	require.Equal(t, ServerID("leader-id"), leaderID)
 }
 
+func TestRaft_InstallSnapshotShortReadDoesNotAdvanceSnapshotState(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	r := &Raft{
+		trans:     transport,
+		logger:    hclog.New(nil),
+		snapshots: NewInmemSnapshotStore(),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+
+	r.raftState.setCurrentTerm(5)
+	r.setLastSnapshot(100, 5)
+	r.setLastApplied(100)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+
+	req := &InstallSnapshotRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		SnapshotVersion:    SnapshotVersionMax,
+		Term:               5,
+		Leader:             encodedLeader,
+		LastLogIndex:       120,
+		LastLogTerm:        5,
+		Configuration:      EncodeConfiguration(Configuration{Servers: []Server{{Suffrage: Voter, ID: leaderID, Address: leaderAddr}}}),
+		ConfigurationIndex: 120,
+		Size:               10,
+	}
+
+	reader := bytes.NewBufferString("abc")
+	chResp := make(chan RPCResponse, 1)
+	r.installSnapshot(RPC{Reader: reader, RespChan: chResp}, req)
+	resp := <-chResp
+	require.Error(t, resp.Error)
+	require.Contains(t, resp.Error.Error(), "short read")
+
+	snapResp, ok := resp.Response.(*InstallSnapshotResponse)
+	require.True(t, ok)
+	require.False(t, snapResp.Success)
+
+	snapshotIndex, snapshotTerm := r.getLastSnapshot()
+	require.Equal(t, uint64(100), snapshotIndex)
+	require.Equal(t, uint64(5), snapshotTerm)
+	require.Equal(t, uint64(100), r.getLastApplied())
+}
+
 func TestRaft_RestoreUserSnapshot_RejectsOutstandingConfigChange(t *testing.T) {
 	r := &Raft{
 		logger: hclog.New(nil),
