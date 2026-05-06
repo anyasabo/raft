@@ -5,6 +5,7 @@ package raft
 
 import (
 	"bytes"
+	"container/list"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3237,6 +3238,46 @@ func TestRaft_RestoreUserSnapshot_RejectsOutstandingConfigChange(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot restore snapshot now")
 	require.Contains(t, err.Error(), "configuration entry at 10")
+}
+
+func TestRaft_RestoreUserSnapshotAbortsInflightOnFailure(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	r := &Raft{
+		trans:       transport,
+		logger:      hclog.New(nil),
+		snapshots:   NewInmemSnapshotStore(),
+		localID:     "local",
+		localAddr:   transport.LocalAddr(),
+		leaderState: leaderState{inflight: list.New()},
+		configurations: configurations{
+			committedIndex: 1,
+			latestIndex:    1,
+		},
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+
+	inflightOne := &logFuture{}
+	inflightOne.init()
+	inflightTwo := &logFuture{}
+	inflightTwo.init()
+	r.leaderState.inflight.PushBack(inflightOne)
+	r.leaderState.inflight.PushBack(inflightTwo)
+
+	meta := &SnapshotMeta{
+		Version: SnapshotVersionMax,
+		Index:   120,
+		Size:    10,
+	}
+	err := r.restoreUserSnapshot(meta, bytes.NewReader([]byte("abc")))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "size didn't match")
+
+	require.Equal(t, ErrAbortedByRestore, inflightOne.Error())
+	require.Equal(t, ErrAbortedByRestore, inflightTwo.Error())
+	require.Nil(t, r.leaderState.inflight.Front(), "inflight queue should be cleared")
 }
 
 func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
