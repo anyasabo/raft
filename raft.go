@@ -1539,8 +1539,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 			// Append the new entries
 			if err := r.logs.StoreLogs(newEntries); err != nil {
 				r.logger.Error("failed to append to logs", "error", err)
-				// TODO: leaving r.getLastLog() in the wrong
-				// state if there was a truncation above
+				r.refreshLastLogFromStore()
 				return
 			}
 
@@ -1578,6 +1577,28 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	// Everything went well, set success
 	resp.Success = true
 	r.setLastContact()
+}
+
+func (r *Raft) refreshLastLogFromStore() {
+	lastIdx, lastTerm := r.getLastSnapshot()
+
+	storeLastIdx, err := r.logs.LastIndex()
+	if err != nil {
+		r.logger.Error("failed to read last index after append failure", "error", err)
+		r.setLastLog(lastIdx, lastTerm)
+		return
+	}
+	if storeLastIdx > 0 {
+		var last Log
+		if err := r.logs.GetLog(storeLastIdx, &last); err != nil {
+			r.logger.Error("failed to read last log after append failure", "index", storeLastIdx, "error", err)
+		} else {
+			lastIdx = last.Index
+			lastTerm = last.Term
+		}
+	}
+
+	r.setLastLog(lastIdx, lastTerm)
 }
 
 // processConfigurationLogEntry takes a log entry and updates the latest
