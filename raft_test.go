@@ -2469,6 +2469,65 @@ func TestRaft_LeadershipTransferPickServer(t *testing.T) {
 	}
 }
 
+func TestRaft_LeadershipTransferPickServerSkipsNonVoters(t *testing.T) {
+	r := Raft{
+		leaderState: leaderState{
+			replState: map[ServerID]*followerReplication{
+				"a": {nextIndex: 12},
+				"b": {nextIndex: 11},
+			},
+		},
+		localID: "z",
+		configurations: configurations{
+			latest: Configuration{
+				Servers: []Server{
+					{ID: "z", Suffrage: Voter},
+					{ID: "a", Suffrage: Nonvoter},
+					{ID: "b", Suffrage: Voter},
+				},
+			},
+		},
+	}
+
+	picked := r.pickServer()
+	require.NotNil(t, picked)
+	require.Equal(t, ServerID("b"), picked.ID, "non-voter with higher nextIndex should be ignored")
+}
+
+func TestRaft_LeadershipTransferPickServerRebalancesAfterBackoff(t *testing.T) {
+	replA := &followerReplication{nextIndex: 12}
+	replB := &followerReplication{nextIndex: 10}
+	r := Raft{
+		leaderState: leaderState{
+			replState: map[ServerID]*followerReplication{
+				"a": replA,
+				"b": replB,
+			},
+		},
+		localID: "z",
+		configurations: configurations{
+			latest: Configuration{
+				Servers: []Server{
+					{ID: "z", Suffrage: Voter},
+					{ID: "a", Suffrage: Voter},
+					{ID: "b", Suffrage: Voter},
+				},
+			},
+		},
+	}
+
+	first := r.pickServer()
+	require.NotNil(t, first)
+	require.Equal(t, ServerID("a"), first.ID)
+
+	atomic.StoreUint64(&replA.nextIndex, 8)
+	atomic.StoreUint64(&replB.nextIndex, 13)
+
+	second := r.pickServer()
+	require.NotNil(t, second)
+	require.Equal(t, ServerID("b"), second.ID, "selection should use fresh nextIndex values after backoff")
+}
+
 func TestRaft_LeadershipTransfer(t *testing.T) {
 	c := MakeCluster(3, t, nil)
 	defer c.Close()
