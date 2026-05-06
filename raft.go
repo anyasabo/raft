@@ -1550,6 +1550,9 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 					r.logger.Warn("failed to append entry",
 						"index", newEntry.Index,
 						"error", err)
+					// Entries have already been durably stored; keep cached lastLog in sync.
+					last := newEntries[n-1]
+					r.setLastLog(last.Index, last.Term)
 					rpcErr = err
 					return
 				}

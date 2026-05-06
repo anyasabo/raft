@@ -2061,6 +2061,76 @@ func TestRaft_AppendEntry(t *testing.T) {
 	require.True(t, resp2.Success)
 }
 
+func TestRaft_AppendEntriesConfigProcessFailureRefreshesLastLog(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{Index: 1, Term: 1, Type: LogCommand, Data: []byte("1")},
+		{Index: 2, Term: 1, Type: LogCommand, Data: []byte("2")},
+	}))
+
+	r := &Raft{
+		trans:     transport,
+		logs:      logs,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+		configurations: configurations{
+			committed:      Configuration{Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}}},
+			committedIndex: 1,
+			latest:         Configuration{Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}}},
+			latestIndex:    1,
+		},
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+	r.setState(Follower)
+	r.setLastLog(2, 1)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		Term:         5,
+		Leader:       encodedLeader,
+		PrevLogEntry: 2,
+		PrevLogTerm:  1,
+		Entries: []*Log{
+			{
+				Index: 3,
+				Term:  5,
+				Type:  LogRemovePeerDeprecated,
+				Data:  []byte("not-msgpack-peers"),
+			},
+		},
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: chResp}, req)
+	resp := <-chResp
+	require.Error(t, resp.Error)
+	require.Contains(t, resp.Error.Error(), "failed to decode peers")
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.False(t, appendResp.Success)
+
+	storeLastIdx, err := logs.LastIndex()
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), storeLastIdx, "entry should already be persisted before config decode error")
+
+	lastIdx, lastTerm := r.getLastLog()
+	require.Equal(t, uint64(3), lastIdx, "cached lastLog should be refreshed to match durable storage")
+	require.Equal(t, uint64(5), lastTerm)
+}
+
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
 // a mix of nodes that have pre-vote activated and deactivated.
 // Once the cluster is created, we force an election by partioning the leader
