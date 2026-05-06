@@ -2656,6 +2656,30 @@ func TestRaft_LeadershipTransferIgnoresNonvoters(t *testing.T) {
 	}
 }
 
+func TestRaft_LeadershipTransferToNonvoterDoesNotDisruptLeader(t *testing.T) {
+	c := MakeCluster(2, t, nil)
+	defer c.Close()
+
+	leader := c.Leader()
+	follower := c.Followers()[0]
+
+	demoteFuture := leader.DemoteVoter(follower.localID, 0, 0)
+	require.NoError(t, demoteFuture.Error())
+
+	originalLeaderID := leader.localID
+	originalTerm := leader.getCurrentTerm()
+
+	future := leader.LeadershipTransferToServer(follower.localID, follower.localAddr)
+	require.Error(t, future.Error())
+
+	// A transfer request to a non-voter should fail without forcing unnecessary
+	// term churn or leader changes.
+	time.Sleep(3 * c.propagateTimeout)
+	stableLeader := c.Leader()
+	require.Equal(t, originalLeaderID, stableLeader.localID)
+	require.Equal(t, originalTerm, stableLeader.getCurrentTerm())
+}
+
 func TestRaft_LeadershipTransferStopRightAway(t *testing.T) {
 	r := Raft{leaderState: leaderState{}, logger: hclog.New(nil)}
 	r.setupLeaderState()
@@ -2897,6 +2921,57 @@ func TestRaft_InstallSnapshot_InvalidPeers(t *testing.T) {
 	resp := <-chResp
 	require.Error(t, resp.Error)
 	require.Contains(t, resp.Error.Error(), "failed to decode peers")
+}
+
+func TestRaft_InstallSnapshot_OlderTermDoesNotRegressLeaderOrTerm(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	r := &Raft{
+		trans:  transport,
+		logger: hclog.New(nil),
+	}
+	r.raftState.setCurrentTerm(5)
+	r.setLeader(ServerAddress("leader-addr"), ServerID("leader-id"))
+
+	req := &InstallSnapshotRequest{
+		Term:            4,
+		SnapshotVersion: SnapshotVersionMax,
+	}
+	chResp := make(chan RPCResponse, 1)
+	rpc := RPC{
+		Reader:   new(bytes.Buffer),
+		RespChan: chResp,
+	}
+	r.installSnapshot(rpc, req)
+	resp := <-chResp
+	require.NoError(t, resp.Error)
+
+	snapResp, ok := resp.Response.(*InstallSnapshotResponse)
+	require.True(t, ok)
+	require.False(t, snapResp.Success)
+	require.Equal(t, uint64(5), snapResp.Term)
+	require.Equal(t, uint64(5), r.getCurrentTerm())
+
+	leaderAddr, leaderID := r.LeaderWithID()
+	require.Equal(t, ServerAddress("leader-addr"), leaderAddr)
+	require.Equal(t, ServerID("leader-id"), leaderID)
+}
+
+func TestRaft_RestoreUserSnapshot_RejectsOutstandingConfigChange(t *testing.T) {
+	r := &Raft{
+		logger: hclog.New(nil),
+		configurations: configurations{
+			committedIndex: 9,
+			latestIndex:    10,
+		},
+	}
+
+	meta := &SnapshotMeta{
+		Version: SnapshotVersionMax,
+	}
+	err := r.restoreUserSnapshot(meta, bytes.NewReader(nil))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot restore snapshot now")
+	require.Contains(t, err.Error(), "configuration entry at 10")
 }
 
 func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
