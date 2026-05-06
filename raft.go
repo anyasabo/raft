@@ -1560,6 +1560,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 					r.logger.Warn("failed to append entry",
 						"index", newEntry.Index,
 						"error", err)
+					r.refreshLastLogFromStore()
 					rpcErr = err
 					return
 				}
