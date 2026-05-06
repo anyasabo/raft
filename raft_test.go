@@ -2656,6 +2656,30 @@ func TestRaft_LeadershipTransferIgnoresNonvoters(t *testing.T) {
 	}
 }
 
+func TestRaft_LeadershipTransferToNonvoterDoesNotDisruptLeader(t *testing.T) {
+	c := MakeCluster(2, t, nil)
+	defer c.Close()
+
+	leader := c.Leader()
+	follower := c.Followers()[0]
+
+	demoteFuture := leader.DemoteVoter(follower.localID, 0, 0)
+	require.NoError(t, demoteFuture.Error())
+
+	originalLeaderID := leader.localID
+	originalTerm := leader.getCurrentTerm()
+
+	future := leader.LeadershipTransferToServer(follower.localID, follower.localAddr)
+	require.Error(t, future.Error())
+
+	// A transfer request to a non-voter should fail without forcing unnecessary
+	// term churn or leader changes.
+	time.Sleep(3 * c.propagateTimeout)
+	stableLeader := c.Leader()
+	require.Equal(t, originalLeaderID, stableLeader.localID)
+	require.Equal(t, originalTerm, stableLeader.getCurrentTerm())
+}
+
 func TestRaft_LeadershipTransferStopRightAway(t *testing.T) {
 	r := Raft{leaderState: leaderState{}, logger: hclog.New(nil)}
 	r.setupLeaderState()

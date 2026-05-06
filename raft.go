@@ -780,6 +780,10 @@ func (r *Raft) leaderLoop() {
 				doneCh <- fmt.Errorf("cannot find replication state for %v", id)
 				continue
 			}
+			if !hasVote(r.configurations.latest, *id) {
+				doneCh <- fmt.Errorf("cannot transfer leadership to non-voter: %v", id)
+				continue
+			}
 			r.setLeadershipTransferInProgress(true)
 			go r.leadershipTransfer(*id, *address, state, stopCh, doneCh)
 
