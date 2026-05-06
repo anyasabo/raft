@@ -2201,6 +2201,76 @@ func TestRaft_VotingGrant_WhenLeaderAvailable(t *testing.T) {
 	}
 }
 
+func TestRaft_RequestVotePrefersAddrOverLegacyCandidate(t *testing.T) {
+	c := MakeCluster(3, t, nil)
+	defer c.Close()
+
+	require.NoError(t, waitForLeader(c))
+	leader := c.Leader()
+
+	followers := c.Followers()
+	require.Len(t, followers, 2)
+	voter := followers[0]
+	other := followers[1]
+
+	leaderT := c.trans[c.IndexOf(leader)]
+	addrBytes := leaderT.EncodePeer(leader.localID, leader.localAddr)
+	legacyBytes := leaderT.EncodePeer(other.localID, other.localAddr)
+
+	reqVote := RequestVoteRequest{
+		RPCHeader:    leader.getRPCHeader(),
+		Term:         voter.getCurrentTerm() + 1,
+		LastLogIndex: leader.LastIndex(),
+		LastLogTerm:  leader.getCurrentTerm(),
+		Candidate:    legacyBytes,
+	}
+	reqVote.Addr = addrBytes
+
+	var resp RequestVoteResponse
+	require.NoError(t, leaderT.RequestVote(voter.localID, voter.localAddr, &reqVote, &resp))
+	require.True(t, resp.Granted, "expected first vote request to be granted")
+
+	lastVoteCand, err := voter.stable.Get(keyLastVoteCand)
+	require.NoError(t, err)
+	require.Equal(t, addrBytes, lastVoteCand, "vote persistence should use RPCHeader.Addr when present")
+
+	reqVote.Candidate = []byte("legacy-mismatch")
+	require.NoError(t, leaderT.RequestVote(voter.localID, voter.localAddr, &reqVote, &resp))
+	require.True(t, resp.Granted, "duplicate vote should still be granted when Addr is unchanged")
+
+	lastVoteCand, err = voter.stable.Get(keyLastVoteCand)
+	require.NoError(t, err)
+	require.Equal(t, addrBytes, lastVoteCand, "persisted vote candidate should remain Addr-based")
+}
+
+func TestRaft_RequestPreVoteRejectsMissingAddrWithKnownLeader(t *testing.T) {
+	c := MakeCluster(3, t, nil)
+	defer c.Close()
+
+	require.NoError(t, waitForLeader(c))
+	leader := c.Leader()
+
+	followers := c.Followers()
+	require.Len(t, followers, 2)
+	candidate := followers[0]
+	voter := followers[1]
+
+	require.Equal(t, leader.localAddr, voter.Leader(), "expected voter to have a known leader before pre-vote")
+
+	candidateT := c.trans[c.IndexOf(candidate)]
+	req := RequestPreVoteRequest{
+		RPCHeader:    candidate.getRPCHeader(),
+		Term:         candidate.getCurrentTerm() + 1,
+		LastLogIndex: candidate.LastIndex(),
+		LastLogTerm:  candidate.getCurrentTerm(),
+	}
+	req.Addr = nil
+
+	var resp RequestPreVoteResponse
+	require.NoError(t, candidateT.RequestPreVote(voter.localID, voter.localAddr, &req, &resp))
+	require.False(t, resp.Granted, "missing candidate Addr must not bypass known-leader pre-vote rejection")
+}
+
 func TestRaft_ProtocolVersion_RejectRPC(t *testing.T) {
 	c := MakeCluster(3, t, nil)
 	defer c.Close()

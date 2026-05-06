@@ -1,61 +1,63 @@
-# Protocol Compatibility Election Modeling Scope
+# Protocol Compatibility Election Model
 
-This document prioritizes the next model area after snapshot catch-up.
+This model targets mixed-version election behavior where vote and pre-vote
+messages can carry candidate identity in different fields across compatibility
+paths.
 
-## Goal
+## Why this matters
 
-Model mixed-version election behavior where vote/pre-vote identity fields and
-transfer semantics differ between legacy and modern protocol paths.
+Raft vote/pre-vote handling combines several compatibility-sensitive decisions:
 
-## Prioritized Risks
+- candidate identity decoding (`Addr` vs legacy `Candidate` bytes),
+- transfer-vote bypass behavior (`LeadershipTransfer`),
+- pre-vote known-leader gating when only legacy candidate encoding is present.
 
-1. Candidate identity source mismatch (`Addr` vs `Candidate`)
-   - High risk because known-leader gating and vote persistence depend on
-     consistent candidate identity decoding.
-2. Leadership-transfer flag compatibility
-   - High risk because transfer elections intentionally bypass known-leader
-     rejection, and dropped flags can cause liveness failures or false rejects.
-3. Pre-vote candidate identity under older headers
-   - Medium risk because `requestPreVote` uses `RPCHeader.Addr`, which can be
-     absent or encoded differently in compatibility paths.
+Regressions here can produce false grants, false rejections, or transfer
+liveness stalls.
 
-## Proposed Model Toggles
+## Files
+
+- `ProtocolCompatElection.tla` - core model
+- `ProtocolCompatElection.cfg` - intended behavior (expected pass)
+- `ProtocolCompatElectionBugIdentity.cfg` - identity-source mismatch bug
+- `ProtocolCompatElectionBugTransferFlag.cfg` - transfer-flag drop bug
+- `ProtocolCompatElectionBugPreVoteFallback.cfg` - pre-vote fallback bug
+
+## Toggles
 
 - `PreferAddrFieldWhenPresent`
-- `DecodeLegacyCandidateAsAddr`
 - `DropTransferFlagOnCompatPath`
-- `RequireKnownLeaderGateForTransferVote`
 - `PreVoteUsesLegacyCandidateFallback`
 
-## Candidate Properties
+## Properties
 
-- `VoteIdentityConsistent`:
-  equivalent candidate identity must be interpreted consistently across
-  protocol variants.
-- `TransferBypassOnlyWithFlag`:
-  vote grant bypass under known leader is allowed only when transfer flag is
-  preserved end-to-end.
-- `PreVoteKnownLeaderGateStable`:
-  non-leader pre-vote remains rejected when a known leader exists, independent
-  of mixed encoding.
-- `NoSameTermDualLeader`:
-  no two nodes become leader for the same term.
+- `VoteIdentityConsistent`
+- `PreVoteKnownLeaderGateStable`
+- `TransferVoteGrantedAfterRequest`
 
-## Runtime Mapping (Deterministic Tests)
+## Run TLC
 
-1. Vote request where `Addr` and legacy `Candidate` disagree:
-   expect deterministic winner for identity decoding and no accidental grant.
-2. Leadership transfer vote where compat layer drops transfer flag:
-   expect transfer election to stall/fail in bug profile and succeed in fixed
-   profile.
-3. Pre-vote request with legacy candidate encoding under known leader:
-   expect rejection to remain stable across protocol versions.
+```bash
+cd "$(git rev-parse --show-toplevel)/docs/formal/protocol_compat_election"
 
-## Execution Order
+java -XX:+UseParallelGC -cp "../tools/tla2tools-v1.8.0.jar" tlc2.TLC \
+  -workers 4 -cleanup -metadir /tmp/tlc-protocol-compat-fixed \
+  ProtocolCompatElection.tla -config ProtocolCompatElection.cfg
 
-1. Build `ProtocolCompatElection.tla` with one fixed config and one bug config
-   per toggle.
-2. Validate TLC sensitivity (fixed passes, each bug profile fails a targeted
-   property).
-3. Derive 1-2 deterministic tests from shortest counterexamples and add to
-   `raft_test.go`.
+java -XX:+UseParallelGC -cp "../tools/tla2tools-v1.8.0.jar" tlc2.TLC \
+  -workers 4 -cleanup -metadir /tmp/tlc-protocol-compat-bug-identity \
+  ProtocolCompatElection.tla -config ProtocolCompatElectionBugIdentity.cfg
+
+java -XX:+UseParallelGC -cp "../tools/tla2tools-v1.8.0.jar" tlc2.TLC \
+  -workers 4 -cleanup -metadir /tmp/tlc-protocol-compat-bug-transfer \
+  ProtocolCompatElection.tla -config ProtocolCompatElectionBugTransferFlag.cfg
+
+java -XX:+UseParallelGC -cp "../tools/tla2tools-v1.8.0.jar" tlc2.TLC \
+  -workers 4 -cleanup -metadir /tmp/tlc-protocol-compat-bug-prevote \
+  ProtocolCompatElection.tla -config ProtocolCompatElectionBugPreVoteFallback.cfg
+```
+
+Expected:
+
+- fixed config passes all checks
+- each bug config violates a targeted invariant
