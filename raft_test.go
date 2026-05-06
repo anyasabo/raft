@@ -2061,6 +2061,88 @@ func TestRaft_AppendEntry(t *testing.T) {
 	require.True(t, resp2.Success)
 }
 
+func TestRaft_AppendEntriesOlderTermAfterSnapshotStateKeepsLeaderAndTerm(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	r := &Raft{
+		trans:     transport,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+
+	r.raftState.setCurrentTerm(5)
+	r.setLastSnapshot(100, 5)
+	r.setCommitIndex(100)
+	r.setLeader(ServerAddress("snapshot-leader"), ServerID("snapshot-id"))
+
+	stale := transport.EncodePeer(ServerID("stale-id"), ServerAddress("stale-leader"))
+	req := &AppendEntriesRequest{
+		Term:   4,
+		Leader: stale,
+	}
+
+	respCh := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: respCh}, req)
+	resp := <-respCh
+	require.NoError(t, resp.Error)
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.False(t, appendResp.Success)
+	require.Equal(t, uint64(5), appendResp.Term)
+	require.Equal(t, uint64(5), r.getCurrentTerm())
+	require.Equal(t, uint64(100), r.getCommitIndex())
+
+	leaderAddr, leaderID := r.LeaderWithID()
+	require.Equal(t, ServerAddress("snapshot-leader"), leaderAddr)
+	require.Equal(t, ServerID("snapshot-id"), leaderID)
+}
+
+func TestRaft_AppendEntriesDoesNotRegressCommitAfterSnapshotState(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	r := &Raft{
+		trans:     transport,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+
+	r.raftState.setCurrentTerm(5)
+	r.setState(Follower)
+	r.setLastSnapshot(100, 5)
+	r.setCommitIndex(100)
+
+	leaderAddr := ServerAddress("snapshot-leader")
+	leaderID := ServerID("snapshot-id")
+	addrBytes := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            addrBytes,
+		},
+		Term:              5,
+		Leader:            addrBytes,
+		LeaderCommitIndex: 80,
+	}
+
+	respCh := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: respCh}, req)
+	resp := <-respCh
+	require.NoError(t, resp.Error)
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.True(t, appendResp.Success)
+	require.Equal(t, uint64(100), r.getCommitIndex(), "commit index should not move backwards")
+}
+
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
 // a mix of nodes that have pre-vote activated and deactivated.
 // Once the cluster is created, we force an election by partioning the leader
