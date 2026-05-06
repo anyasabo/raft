@@ -2003,6 +2003,18 @@ func TestRaft_NotifyCh(t *testing.T) {
 	}
 }
 
+type appendFailingLogStore struct {
+	*InmemStore
+	failStoreLogs bool
+}
+
+func (s *appendFailingLogStore) StoreLogs(logs []*Log) error {
+	if s.failStoreLogs {
+		return errors.New("injected StoreLogs failure")
+	}
+	return s.InmemStore.StoreLogs(logs)
+}
+
 func TestRaft_AppendEntry(t *testing.T) {
 	c := MakeCluster(3, t, nil)
 	defer c.Close()
@@ -2142,6 +2154,68 @@ func TestRaft_AppendEntriesDoesNotRegressCommitAfterSnapshotState(t *testing.T) 
 	require.True(t, ok)
 	require.True(t, appendResp.Success)
 	require.Equal(t, uint64(100), r.getCommitIndex(), "commit index should not move backwards")
+}
+
+func TestRaft_AppendEntriesStoreLogsFailureRefreshesLastLogAfterTruncate(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := &appendFailingLogStore{InmemStore: NewInmemStore()}
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{Index: 1, Term: 1, Type: LogCommand, Data: []byte("1")},
+		{Index: 2, Term: 1, Type: LogCommand, Data: []byte("2")},
+		{Index: 3, Term: 1, Type: LogCommand, Data: []byte("3")},
+		{Index: 4, Term: 1, Type: LogCommand, Data: []byte("4")},
+		{Index: 5, Term: 1, Type: LogCommand, Data: []byte("5")},
+	}))
+	logs.failStoreLogs = true
+
+	r := &Raft{
+		trans:     transport,
+		logs:      logs,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+	r.setState(Follower)
+	r.setLastLog(5, 1)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		Term:         5,
+		Leader:       encodedLeader,
+		PrevLogEntry: 2,
+		PrevLogTerm:  1,
+		Entries: []*Log{
+			{Index: 3, Term: 2, Type: LogCommand, Data: []byte("replacement-3")},
+		},
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: chResp}, req)
+	resp := <-chResp
+	require.NoError(t, resp.Error)
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.False(t, appendResp.Success)
+
+	lastIdx, lastTerm := r.getLastLog()
+	require.Equal(t, uint64(2), lastIdx, "last log index should match durable log store after truncation+failure")
+	require.Equal(t, uint64(1), lastTerm)
+
+	storeLastIdx, err := logs.LastIndex()
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), storeLastIdx)
 }
 
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
