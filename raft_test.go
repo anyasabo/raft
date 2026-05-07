@@ -1214,6 +1214,36 @@ func (b *lockedBytesBuffer) String() string {
 // TODO: Need a test to process old-style entries in the Raft log when starting
 // up.
 
+func TestRaft_NewRaftMalformedConfigurationEntryInLogReturnsError(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	snapshots := NewInmemSnapshotStore()
+
+	validConf := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}},
+	}
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{
+			Index: 1,
+			Term:  1,
+			Type:  LogConfiguration,
+			Data:  EncodeConfiguration(validConf),
+		},
+		{
+			Index: 2,
+			Term:  1,
+			Type:  LogConfiguration,
+			Data:  []byte("not-msgpack-configuration"),
+		},
+	}))
+
+	conf := *inmemConfig(t)
+	conf.LocalID = "local"
+	_, err := NewRaft(&conf, &MockFSM{}, logs, logs, snapshots, transport)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to decode configuration")
+}
+
 func TestRaft_NoRestoreOnStart(t *testing.T) {
 	conf := inmemConfig(t)
 	conf.TrailingLogs = 10
