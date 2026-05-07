@@ -1214,6 +1214,36 @@ func (b *lockedBytesBuffer) String() string {
 // TODO: Need a test to process old-style entries in the Raft log when starting
 // up.
 
+func TestRaft_NewRaftMalformedConfigurationEntryInLogReturnsError(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	snapshots := NewInmemSnapshotStore()
+
+	validConf := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}},
+	}
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{
+			Index: 1,
+			Term:  1,
+			Type:  LogConfiguration,
+			Data:  EncodeConfiguration(validConf),
+		},
+		{
+			Index: 2,
+			Term:  1,
+			Type:  LogConfiguration,
+			Data:  []byte("not-msgpack-configuration"),
+		},
+	}))
+
+	conf := *inmemConfig(t)
+	conf.LocalID = "local"
+	_, err := NewRaft(&conf, &MockFSM{}, logs, logs, snapshots, transport)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to decode configuration")
+}
+
 func TestRaft_NoRestoreOnStart(t *testing.T) {
 	conf := inmemConfig(t)
 	conf.TrailingLogs = 10
@@ -2061,6 +2091,176 @@ func TestRaft_AppendEntry(t *testing.T) {
 	require.True(t, resp2.Success)
 }
 
+func TestRaft_AppendEntriesMalformedConfigurationReturnsError(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	logs := NewInmemStore()
+	require.NoError(t, logs.StoreLogs([]*Log{
+		{Index: 1, Term: 1, Type: LogCommand, Data: []byte("1")},
+		{Index: 2, Term: 1, Type: LogCommand, Data: []byte("2")},
+	}))
+
+	initialCommitted := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "committed", Address: transport.LocalAddr()}},
+	}
+	initialLatest := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "latest", Address: transport.LocalAddr()}},
+	}
+	r := &Raft{
+		trans:     transport,
+		logs:      logs,
+		logger:    hclog.New(nil),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+		configurations: configurations{
+			committed:      initialCommitted,
+			committedIndex: 1,
+			latest:         initialLatest,
+			latestIndex:    2,
+		},
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+	r.setState(Follower)
+	r.setLastLog(2, 1)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+	req := &AppendEntriesRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		Term:         5,
+		Leader:       encodedLeader,
+		PrevLogEntry: 2,
+		PrevLogTerm:  1,
+		Entries: []*Log{
+			{
+				Index: 3,
+				Term:  5,
+				Type:  LogConfiguration,
+				Data:  []byte("not-msgpack-configuration"),
+			},
+		},
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.appendEntries(RPC{RespChan: chResp}, req)
+	resp := <-chResp
+	require.Error(t, resp.Error)
+	require.Contains(t, resp.Error.Error(), "failed to decode configuration")
+
+	appendResp, ok := resp.Response.(*AppendEntriesResponse)
+	require.True(t, ok)
+	require.False(t, appendResp.Success)
+
+	// The malformed entry was StoreLogs'd before processConfigurationLogEntry
+	// rejected it, so it IS in the log store.
+	var storedEntry Log
+	require.NoError(t, logs.GetLog(3, &storedEntry))
+	require.Equal(t, LogConfiguration, storedEntry.Type)
+
+	// But lastLog was NOT updated (setLastLog at the end of the newEntries
+	// block was skipped due to the early return).
+	lastIdx, lastTerm := r.getLastLog()
+	require.Equal(t, uint64(2), lastIdx)
+	require.Equal(t, uint64(1), lastTerm)
+
+	// Configuration state was not mutated because decode failed before
+	// setCommittedConfiguration/setLatestConfiguration.
+	require.Equal(t, uint64(1), r.configurations.committedIndex)
+	require.Equal(t, uint64(2), r.configurations.latestIndex)
+	require.Equal(t, initialCommitted, r.configurations.committed)
+	require.Equal(t, initialLatest, r.configurations.latest)
+}
+
+func TestRaft_RunFSMMalformedConfigurationSkipsEntryAndContinues(t *testing.T) {
+	mock := &MockFSM{}
+	r := &Raft{
+		fsm:         &MockFSMConfigStore{FSM: mock},
+		fsmMutateCh: make(chan interface{}, 1),
+		shutdownCh:  make(chan struct{}),
+		logger:      hclog.New(nil),
+	}
+
+	waitFuture := func(f *logFuture) {
+		t.Helper()
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- f.Error()
+		}()
+
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for log future")
+		}
+	}
+
+	fsmDone := make(chan struct{})
+	go func() {
+		r.runFSM()
+		close(fsmDone)
+	}()
+	defer func() {
+		close(r.shutdownCh)
+		select {
+		case <-fsmDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for runFSM shutdown")
+		}
+	}()
+
+	badFuture := &logFuture{}
+	badFuture.ShutdownCh = r.shutdownCh
+	badFuture.init()
+	r.fsmMutateCh <- []*commitTuple{
+		{
+			log: &Log{
+				Index: 1,
+				Term:  1,
+				Type:  LogConfiguration,
+				Data:  []byte("not-msgpack-configuration"),
+			},
+			future: badFuture,
+		},
+	}
+	waitFuture(badFuture)
+
+	mock.Lock()
+	require.Len(t, mock.configurations, 0)
+	mock.Unlock()
+
+	validConf := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "node-1", Address: "node-1"}},
+	}
+	goodFuture := &logFuture{}
+	goodFuture.ShutdownCh = r.shutdownCh
+	goodFuture.init()
+	r.fsmMutateCh <- []*commitTuple{
+		{
+			log: &Log{
+				Index: 2,
+				Term:  1,
+				Type:  LogConfiguration,
+				Data:  EncodeConfiguration(validConf),
+			},
+			future: goodFuture,
+		},
+	}
+	waitFuture(goodFuture)
+
+	mock.Lock()
+	require.Len(t, mock.configurations, 1)
+	require.Equal(t, validConf, mock.configurations[0])
+	mock.Unlock()
+}
+
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
 // a mix of nodes that have pre-vote activated and deactivated.
 // Once the cluster is created, we force an election by partioning the leader
@@ -2897,6 +3097,76 @@ func TestRaft_InstallSnapshot_InvalidPeers(t *testing.T) {
 	resp := <-chResp
 	require.Error(t, resp.Error)
 	require.Contains(t, resp.Error.Error(), "failed to decode peers")
+}
+
+func TestRaft_InstallSnapshotMalformedConfigurationReturnsError(t *testing.T) {
+	_, transport := NewInmemTransport("")
+	initialCommitted := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "committed", Address: transport.LocalAddr()}},
+	}
+	initialLatest := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "latest", Address: transport.LocalAddr()}},
+	}
+	r := &Raft{
+		trans:     transport,
+		logger:    hclog.New(nil),
+		snapshots: NewInmemSnapshotStore(),
+		localID:   "local",
+		localAddr: transport.LocalAddr(),
+		configurations: configurations{
+			committed:      initialCommitted,
+			committedIndex: 77,
+			latest:         initialLatest,
+			latestIndex:    80,
+		},
+	}
+	cfg := *DefaultConfig()
+	cfg.LocalID = r.localID
+	r.conf.Store(cfg)
+	r.raftState.setCurrentTerm(5)
+	r.setLastSnapshot(100, 5)
+	r.setLastApplied(100)
+
+	leaderID := ServerID("leader-id")
+	leaderAddr := ServerAddress("leader-addr")
+	encodedLeader := transport.EncodePeer(leaderID, leaderAddr)
+
+	req := &InstallSnapshotRequest{
+		RPCHeader: RPCHeader{
+			ProtocolVersion: cfg.ProtocolVersion,
+			ID:              []byte(leaderID),
+			Addr:            encodedLeader,
+		},
+		SnapshotVersion:    SnapshotVersionMax,
+		Term:               5,
+		Leader:             encodedLeader,
+		LastLogIndex:       120,
+		LastLogTerm:        5,
+		Configuration:      []byte("not-msgpack-configuration"),
+		ConfigurationIndex: 120,
+		Size:               0,
+	}
+
+	chResp := make(chan RPCResponse, 1)
+	r.installSnapshot(RPC{Reader: bytes.NewReader(nil), RespChan: chResp}, req)
+	resp := <-chResp
+	require.Error(t, resp.Error)
+	require.Contains(t, resp.Error.Error(), "failed to decode configuration")
+
+	snapResp, ok := resp.Response.(*InstallSnapshotResponse)
+	require.True(t, ok)
+	require.False(t, snapResp.Success)
+
+	snapshotIndex, snapshotTerm := r.getLastSnapshot()
+	require.Equal(t, uint64(100), snapshotIndex)
+	require.Equal(t, uint64(5), snapshotTerm)
+	require.Equal(t, uint64(100), r.getLastApplied())
+
+	// Configuration state was not mutated by the failed decode.
+	require.Equal(t, initialCommitted, r.configurations.committed)
+	require.Equal(t, initialLatest, r.configurations.latest)
+	require.Equal(t, uint64(77), r.configurations.committedIndex)
+	require.Equal(t, uint64(80), r.configurations.latestIndex)
 }
 
 func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
