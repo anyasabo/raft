@@ -2069,6 +2069,12 @@ func TestRaft_AppendEntriesMalformedConfigurationReturnsError(t *testing.T) {
 		{Index: 2, Term: 1, Type: LogCommand, Data: []byte("2")},
 	}))
 
+	initialCommitted := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "committed", Address: transport.LocalAddr()}},
+	}
+	initialLatest := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "latest", Address: transport.LocalAddr()}},
+	}
 	r := &Raft{
 		trans:     transport,
 		logs:      logs,
@@ -2076,10 +2082,10 @@ func TestRaft_AppendEntriesMalformedConfigurationReturnsError(t *testing.T) {
 		localID:   "local",
 		localAddr: transport.LocalAddr(),
 		configurations: configurations{
-			committed:      Configuration{Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}}},
+			committed:      initialCommitted,
 			committedIndex: 1,
-			latest:         Configuration{Servers: []Server{{Suffrage: Voter, ID: "local", Address: transport.LocalAddr()}}},
-			latestIndex:    1,
+			latest:         initialLatest,
+			latestIndex:    2,
 		},
 	}
 	cfg := *DefaultConfig()
@@ -2137,7 +2143,92 @@ func TestRaft_AppendEntriesMalformedConfigurationReturnsError(t *testing.T) {
 	// Configuration state was not mutated because decode failed before
 	// setCommittedConfiguration/setLatestConfiguration.
 	require.Equal(t, uint64(1), r.configurations.committedIndex)
-	require.Equal(t, uint64(1), r.configurations.latestIndex)
+	require.Equal(t, uint64(2), r.configurations.latestIndex)
+	require.Equal(t, initialCommitted, r.configurations.committed)
+	require.Equal(t, initialLatest, r.configurations.latest)
+}
+
+func TestRaft_RunFSMMalformedConfigurationSkipsEntryAndContinues(t *testing.T) {
+	mock := &MockFSM{}
+	r := &Raft{
+		fsm:         &MockFSMConfigStore{FSM: mock},
+		fsmMutateCh: make(chan interface{}, 1),
+		shutdownCh:  make(chan struct{}),
+		logger:      hclog.New(nil),
+	}
+
+	waitFuture := func(f *logFuture) {
+		t.Helper()
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- f.Error()
+		}()
+
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for log future")
+		}
+	}
+
+	fsmDone := make(chan struct{})
+	go func() {
+		r.runFSM()
+		close(fsmDone)
+	}()
+	defer func() {
+		close(r.shutdownCh)
+		select {
+		case <-fsmDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for runFSM shutdown")
+		}
+	}()
+
+	badFuture := &logFuture{}
+	badFuture.ShutdownCh = r.shutdownCh
+	badFuture.init()
+	r.fsmMutateCh <- []*commitTuple{
+		{
+			log: &Log{
+				Index: 1,
+				Term:  1,
+				Type:  LogConfiguration,
+				Data:  []byte("not-msgpack-configuration"),
+			},
+			future: badFuture,
+		},
+	}
+	waitFuture(badFuture)
+
+	mock.Lock()
+	require.Len(t, mock.configurations, 0)
+	mock.Unlock()
+
+	validConf := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "node-1", Address: "node-1"}},
+	}
+	goodFuture := &logFuture{}
+	goodFuture.ShutdownCh = r.shutdownCh
+	goodFuture.init()
+	r.fsmMutateCh <- []*commitTuple{
+		{
+			log: &Log{
+				Index: 2,
+				Term:  1,
+				Type:  LogConfiguration,
+				Data:  EncodeConfiguration(validConf),
+			},
+			future: goodFuture,
+		},
+	}
+	waitFuture(goodFuture)
+
+	mock.Lock()
+	require.Len(t, mock.configurations, 1)
+	require.Equal(t, validConf, mock.configurations[0])
+	mock.Unlock()
 }
 
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
@@ -2980,12 +3071,24 @@ func TestRaft_InstallSnapshot_InvalidPeers(t *testing.T) {
 
 func TestRaft_InstallSnapshotMalformedConfigurationReturnsError(t *testing.T) {
 	_, transport := NewInmemTransport("")
+	initialCommitted := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "committed", Address: transport.LocalAddr()}},
+	}
+	initialLatest := Configuration{
+		Servers: []Server{{Suffrage: Voter, ID: "latest", Address: transport.LocalAddr()}},
+	}
 	r := &Raft{
 		trans:     transport,
 		logger:    hclog.New(nil),
 		snapshots: NewInmemSnapshotStore(),
 		localID:   "local",
 		localAddr: transport.LocalAddr(),
+		configurations: configurations{
+			committed:      initialCommitted,
+			committedIndex: 77,
+			latest:         initialLatest,
+			latestIndex:    80,
+		},
 	}
 	cfg := *DefaultConfig()
 	cfg.LocalID = r.localID
@@ -3030,10 +3133,10 @@ func TestRaft_InstallSnapshotMalformedConfigurationReturnsError(t *testing.T) {
 	require.Equal(t, uint64(100), r.getLastApplied())
 
 	// Configuration state was not mutated by the failed decode.
-	require.Empty(t, r.configurations.committed.Servers)
-	require.Empty(t, r.configurations.latest.Servers)
-	require.Equal(t, uint64(0), r.configurations.committedIndex)
-	require.Equal(t, uint64(0), r.configurations.latestIndex)
+	require.Equal(t, initialCommitted, r.configurations.committed)
+	require.Equal(t, initialLatest, r.configurations.latest)
+	require.Equal(t, uint64(77), r.configurations.committedIndex)
+	require.Equal(t, uint64(80), r.configurations.latestIndex)
 }
 
 func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
