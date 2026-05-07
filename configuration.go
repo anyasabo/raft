@@ -357,6 +357,8 @@ func EncodeConfiguration(configuration Configuration) []byte {
 	return buf.Bytes()
 }
 
+// decodeConfiguration is the error-returning counterpart of DecodeConfiguration.
+// Used in RPC and FSM paths that handle untrusted or potentially-corrupt payloads.
 func decodeConfiguration(buf []byte) (Configuration, error) {
 	var configuration Configuration
 	if err := decodeMsgPack(buf, &configuration); err != nil {

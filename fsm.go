@@ -114,8 +114,15 @@ func (r *Raft) runFSM() {
 				return
 			}
 
+			conf, err := decodeConfiguration(req.log.Data)
+			if err != nil {
+				r.logger.Error("failed to decode configuration in FSM apply, skipping",
+					"index", req.log.Index, "error", err)
+				return
+			}
+
 			start := time.Now()
-			configStore.StoreConfiguration(req.log.Index, DecodeConfiguration(req.log.Data))
+			configStore.StoreConfiguration(req.log.Index, conf)
 			metrics.MeasureSince([]string{"raft", "fsm", "store_config"}, start)
 		}
 

@@ -2121,6 +2121,23 @@ func TestRaft_AppendEntriesMalformedConfigurationReturnsError(t *testing.T) {
 	appendResp, ok := resp.Response.(*AppendEntriesResponse)
 	require.True(t, ok)
 	require.False(t, appendResp.Success)
+
+	// The malformed entry was StoreLogs'd before processConfigurationLogEntry
+	// rejected it, so it IS in the log store.
+	var storedEntry Log
+	require.NoError(t, logs.GetLog(3, &storedEntry))
+	require.Equal(t, LogConfiguration, storedEntry.Type)
+
+	// But lastLog was NOT updated (setLastLog at the end of the newEntries
+	// block was skipped due to the early return).
+	lastIdx, lastTerm := r.getLastLog()
+	require.Equal(t, uint64(2), lastIdx)
+	require.Equal(t, uint64(1), lastTerm)
+
+	// Configuration state was not mutated because decode failed before
+	// setCommittedConfiguration/setLatestConfiguration.
+	require.Equal(t, uint64(1), r.configurations.committedIndex)
+	require.Equal(t, uint64(1), r.configurations.latestIndex)
 }
 
 // TestRaft_PreVoteMixedCluster focus on testing a cluster with
@@ -3011,6 +3028,12 @@ func TestRaft_InstallSnapshotMalformedConfigurationReturnsError(t *testing.T) {
 	require.Equal(t, uint64(100), snapshotIndex)
 	require.Equal(t, uint64(5), snapshotTerm)
 	require.Equal(t, uint64(100), r.getLastApplied())
+
+	// Configuration state was not mutated by the failed decode.
+	require.Empty(t, r.configurations.committed.Servers)
+	require.Empty(t, r.configurations.latest.Servers)
+	require.Equal(t, uint64(0), r.configurations.committedIndex)
+	require.Equal(t, uint64(0), r.configurations.latestIndex)
 }
 
 func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
